@@ -9,6 +9,8 @@
   "scripts": {
     "setup": "node scripts/setup.mjs",
     "start": "node --env-file-if-exists=.env src/server.js",
+    "start:kyc": "node --watch --env-file-if-exists=.env scripts/start-kyc-server.mjs",
+    "test:kyc": "node --env-file-if-exists=.env scripts/test-surepass.mjs",
     "migrate": "node --env-file-if-exists=.env scripts/migrate.mjs",
     "export": "node --env-file-if-exists=.env scripts/export.mjs",
     "test": "node --env-file-if-exists=.env --test --test-concurrency=1 test/*.test.js",

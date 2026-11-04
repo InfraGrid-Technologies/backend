@@ -11,6 +11,7 @@ import {authHook} from './auth.js';
 import {normalizeError} from './errors.js';
 import {errors,noQuery} from './http/schemas.js';
 import {registerModules} from './modules/register.js';
+import kycModule from './modules/kyc/index.js';
 
 export async function buildApp(config,{logger=true}={}) {
   const app=Fastify({bodyLimit:1024*1024,genReqId:()=>randomUUID(),requestIdHeader:false,
@@ -49,6 +50,7 @@ export async function buildApp(config,{logger=true}={}) {
     await app.register(swaggerUI,{routePrefix:'/docs'});
     app.get('/v1/resources',{schema:{tags:['Metadata'],summary:'List all model resources, schemas, keys and constraints',querystring:noQuery,response:errors}},async request=>({data:resources.map(describeResource),meta:{requestId:request.id}}));
     await registerModules(app,{resources,service,db});
+    await app.register(kycModule,{config,db});
     app.post('/v1/transactions',{schema:{tags:['Transactions'],summary:'Apply up to 25 model writes atomically',
       description:'Admin only. Includes audit records in the same transaction. All writes and deferred ledger checks must pass before commit. Supply explicit UUIDs to link newly created rows. No SQL or arbitrary RPCs accepted.',
       querystring:noQuery,body:{type:'object',properties:{operations:{type:'array',minItems:1,maxItems:25,items:{type:'object',properties:{
