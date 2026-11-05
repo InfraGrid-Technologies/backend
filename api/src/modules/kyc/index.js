@@ -14,12 +14,12 @@ export default async function kycModule(fastify, opts = {}) {
   const logger = fastify.log;
 
   // 1. Resolve Provider (Mock or Surepass or future provider based on .env)
-  const provider = getKycProvider(config, logger);
+  const provider = opts.provider || getKycProvider(config, logger);
 
   // 2. Instantiate Repository, Service, and Controller
-  const repo = createKycRepository(db);
-  const service = createKycService(provider, repo, logger);
-  const controller = createKycController(service);
+  const repo = opts.repo || createKycRepository(db);
+  const service = opts.service || createKycService(provider, repo, logger);
+  const controller = opts.controller || createKycController(service);
 
   // 3. Register Routes under /v1/kyc
   await fastify.register(kycRoutes, {

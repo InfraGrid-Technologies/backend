@@ -6,6 +6,9 @@ import {
   aadhaarStatusSchema,
   challanSchema,
   clearCacheSchema,
+  getHistorySchema,
+  getConsentSchema,
+  revokeConsentSchema,
 } from './kyc.schemas.js';
 
 /**
@@ -13,25 +16,25 @@ import {
  * Mounted under /v1/kyc
  */
 export async function kycRoutes(fastify, { controller }) {
-  // 1. Driving License Verification
+  // 1. Driving License Verification (with DPDP consent)
   fastify.post('/driving-license', {
     schema: drivingLicenseSchema,
     handler: controller.verifyDrivingLicense,
   });
 
-  // 2. Bank Account Verification (Penny Drop)
+  // 2. Bank Account Verification (Penny Drop with DPDP consent)
   fastify.post('/bank-account', {
     schema: bankAccountSchema,
     handler: controller.verifyBankAccount,
   });
 
-  // 3. Vehicle RC (PUC, Fitness, Insurance)
+  // 3. Vehicle RC (PUC, Fitness, Insurance with DPDP consent)
   fastify.post('/rc', {
     schema: rcSchema,
     handler: controller.verifyRc,
   });
 
-  // 4. Vehicle E-Challan Verification
+  // 4. Vehicle E-Challan Verification (with DPDP consent)
   fastify.post('/challan', {
     schema: challanSchema,
     handler: controller.verifyChallan,
@@ -49,20 +52,9 @@ export async function kycRoutes(fastify, { controller }) {
     handler: controller.getAadhaarDetails,
   });
 
-  // 7. Verification History lookup
+  // 7. Verification History lookup (₹0 cost - internal database query)
   fastify.get('/history/:type/:idNumber', {
-    schema: {
-      tags: ['KYC'],
-      summary: 'Get verification audit history',
-      params: {
-        type: 'object',
-        required: ['type', 'idNumber'],
-        properties: {
-          type: { type: 'string', enum: ['driving_license', 'bank_account', 'rc', 'aadhaar', 'challan'] },
-          idNumber: { type: 'string' },
-        },
-      },
-    },
+    schema: getHistorySchema,
     handler: controller.getHistory,
   });
 
@@ -70,6 +62,18 @@ export async function kycRoutes(fastify, { controller }) {
   fastify.delete('/cache', {
     schema: clearCacheSchema,
     handler: controller.clearCache,
+  });
+
+  // 9. Get DPDP Consent Artifact Details
+  fastify.get('/consents/:consentId', {
+    schema: getConsentSchema,
+    handler: controller.getConsent,
+  });
+
+  // 10. Revoke Consent under DPDP Act Section 6(4)
+  fastify.post('/consents/:consentId/revoke', {
+    schema: revokeConsentSchema,
+    handler: controller.revokeConsent,
   });
 }
 

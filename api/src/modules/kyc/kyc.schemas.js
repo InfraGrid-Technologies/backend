@@ -3,6 +3,31 @@
  * Rejects invalid inputs before calling paid external APIs.
  */
 
+// Reusable user consent schema under DPDP Act 2023
+export const consentSchema = {
+  type: 'object',
+  required: ['agreed', 'noticeVersion'],
+  properties: {
+    agreed: {
+      type: 'boolean',
+      enum: [true],
+      description: 'Explicit user authorization confirming consent is given.',
+    },
+    noticeVersion: {
+      type: 'string',
+      minLength: 3,
+      maxLength: 50,
+      description: 'Version identifier of the privacy notice displayed to the user (e.g. DL_NOTICE_V1.0).',
+    },
+    noticeText: {
+      type: 'string',
+      maxLength: 2000,
+      description: 'Snapshot of the legal consent text displayed to the user.',
+    },
+  },
+  additionalProperties: false,
+};
+
 // Driving License validation schema
 export const drivingLicenseSchema = {
   summary: 'Verify Driving License',
@@ -10,7 +35,7 @@ export const drivingLicenseSchema = {
   tags: ['KYC'],
   body: {
     type: 'object',
-    required: ['dlNumber', 'dob'],
+    required: ['dlNumber', 'dob', 'consent'],
     properties: {
       dlNumber: {
         type: 'string',
@@ -23,6 +48,7 @@ export const drivingLicenseSchema = {
         pattern: '^\\d{4}-\\d{2}-\\d{2}$',
         description: 'Date of birth in YYYY-MM-DD format (required by RTO)',
       },
+      consent: consentSchema,
       forceRefresh: {
         type: 'boolean',
         default: false,
@@ -38,6 +64,7 @@ export const drivingLicenseSchema = {
         success: { type: 'boolean' },
         source: { type: 'string', enum: ['CACHE', 'PROVIDER'] },
         provider: { type: 'string' },
+        consentId: { type: 'string' },
         data: { type: 'object', additionalProperties: true },
       },
     },
@@ -51,7 +78,7 @@ export const bankAccountSchema = {
   tags: ['KYC'],
   body: {
     type: 'object',
-    required: ['accountNumber', 'ifsc'],
+    required: ['accountNumber', 'ifsc', 'consent'],
     properties: {
       accountNumber: {
         type: 'string',
@@ -67,6 +94,7 @@ export const bankAccountSchema = {
         type: 'string',
         description: 'Optional: Full name from Aadhaar or DL to verify if bank account belongs to the same user',
       },
+      consent: consentSchema,
       forceRefresh: {
         type: 'boolean',
         default: false,
@@ -82,6 +110,7 @@ export const bankAccountSchema = {
         success: { type: 'boolean' },
         source: { type: 'string', enum: ['CACHE', 'PROVIDER'] },
         provider: { type: 'string' },
+        consentId: { type: 'string' },
         data: { type: 'object', additionalProperties: true },
       },
     },
@@ -95,13 +124,14 @@ export const rcSchema = {
   tags: ['KYC'],
   body: {
     type: 'object',
-    required: ['vehicleNumber'],
+    required: ['vehicleNumber', 'consent'],
     properties: {
       vehicleNumber: {
         type: 'string',
         pattern: '^[A-Z]{2}[0-9]{1,2}[A-Z]{0,3}[0-9]{4}$',
         description: 'Vehicle Registration Number without hyphens or spaces (e.g. MH12AB1234)',
       },
+      consent: consentSchema,
       forceRefresh: {
         type: 'boolean',
         default: false,
@@ -117,6 +147,7 @@ export const rcSchema = {
         success: { type: 'boolean' },
         source: { type: 'string', enum: ['CACHE', 'PROVIDER'] },
         provider: { type: 'string' },
+        consentId: { type: 'string' },
         data: { type: 'object', additionalProperties: true },
       },
     },
@@ -130,6 +161,7 @@ export const aadhaarInitiateSchema = {
   tags: ['KYC'],
   body: {
     type: 'object',
+    required: ['consent'],
     properties: {
       redirectUrl: {
         type: 'string',
@@ -151,6 +183,7 @@ export const aadhaarInitiateSchema = {
         default: false,
         description: 'Skip introductory screen and go directly to Aadhaar input',
       },
+      consent: consentSchema,
     },
     additionalProperties: false,
   },
@@ -160,6 +193,7 @@ export const aadhaarInitiateSchema = {
       properties: {
         success: { type: 'boolean' },
         provider: { type: 'string' },
+        consentId: { type: 'string' },
         data: {
           type: 'object',
           properties: {
@@ -205,7 +239,7 @@ export const challanSchema = {
   tags: ['KYC'],
   body: {
     type: 'object',
-    required: ['rcNumber'],
+    required: ['rcNumber', 'consent'],
     properties: {
       rcNumber: {
         type: 'string',
@@ -234,6 +268,7 @@ export const challanSchema = {
         default: ['DL', 'TS', 'GJ'],
         description: 'List of state traffic portals to query. Defaults to fast portals: ["DL", "TS", "GJ"]. You can also pass ["DL", "TS", "KA", "GJ"].',
       },
+      consent: consentSchema,
       forceRefresh: {
         type: 'boolean',
         default: false,
@@ -249,6 +284,7 @@ export const challanSchema = {
         success: { type: 'boolean' },
         source: { type: 'string', enum: ['CACHE', 'PROVIDER'] },
         provider: { type: 'string' },
+        consentId: { type: 'string' },
         data: { type: 'object', additionalProperties: true },
       },
     },
@@ -263,8 +299,20 @@ export const clearCacheSchema = {
   querystring: {
     type: 'object',
     properties: {
-      type: { type: 'string', enum: ['driving_license', 'bank_account', 'rc', 'aadhaar', 'challan'] },
-      idNumber: { type: 'string' },
+      type: {
+        type: 'string',
+        enum: [
+          'driving_license',
+          'driving-license',
+          'bank_account',
+          'bank-account',
+          'rc',
+          'aadhaar',
+          'challan',
+        ],
+        description: 'Verification type to clear',
+      },
+      idNumber: { type: 'string', description: 'Specific ID to invalidate' },
     },
     additionalProperties: false,
   },
@@ -278,3 +326,130 @@ export const clearCacheSchema = {
     },
   },
 };
+
+// Verification History Schema
+export const getHistorySchema = {
+  summary: 'Get verification audit history',
+  description: 'Fetches local audit log of all verifications performed for an ID. Internal database query - costs ₹0.',
+  tags: ['KYC'],
+  params: {
+    type: 'object',
+    required: ['type', 'idNumber'],
+    properties: {
+      type: {
+        type: 'string',
+        enum: [
+          'driving_license',
+          'driving-license',
+          'bank_account',
+          'bank-account',
+          'rc',
+          'aadhaar',
+          'challan',
+        ],
+        description: 'Verification type (e.g. driving_license or driving-license, rc, challan, bank_account, aadhaar)',
+      },
+      idNumber: {
+        type: 'string',
+        description: 'Document or account identifier (e.g. TS01620240001534, MH1420110062821)',
+      },
+    },
+    additionalProperties: false,
+  },
+  response: {
+    200: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        count: { type: 'integer' },
+        data: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              verification_type: { type: 'string' },
+              id_number: { type: 'string' },
+              status: { type: 'string' },
+              provider: { type: 'string' },
+              consent_id: { type: 'string', nullable: true },
+              created_at: { type: 'string' },
+              response_data: { type: 'object', additionalProperties: true },
+            },
+            additionalProperties: true,
+          },
+        },
+      },
+    },
+  },
+};
+
+// Get Consent Schema
+export const getConsentSchema = {
+  summary: 'Get Consent Artifact Details',
+  description: 'Fetches immutable consent artifact by consent ID for DPDP Act audit verification.',
+  tags: ['KYC'],
+  params: {
+    type: 'object',
+    required: ['consentId'],
+    properties: {
+      consentId: { type: 'string', minLength: 1, maxLength: 100, description: 'Consent record ID or UUID' },
+    },
+  },
+  response: {
+    200: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        data: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            actor_id: { type: 'string', nullable: true },
+            consent_type: { type: 'string' },
+            purpose: { type: 'string' },
+            notice_version: { type: 'string' },
+            notice_text: { type: 'string' },
+            ip_address: { type: 'string' },
+            user_agent: { type: 'string', nullable: true },
+            status: { type: 'string' },
+            granted_at: { type: 'string' },
+            revoked_at: { type: 'string', nullable: true },
+          },
+        },
+      },
+    },
+  },
+};
+
+// Revoke Consent Schema
+export const revokeConsentSchema = {
+  summary: 'Revoke User Consent',
+  description: 'Revokes a previously granted user consent under DPDP Act 2023 Section 6(4).',
+  tags: ['KYC'],
+  params: {
+    type: 'object',
+    required: ['consentId'],
+    properties: {
+      consentId: { type: 'string', minLength: 1, maxLength: 100, description: 'Consent record ID or UUID' },
+    },
+  },
+  response: {
+    200: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        message: { type: 'string' },
+        data: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            status: { type: 'string' },
+            revoked_at: { type: 'string' },
+          },
+        },
+      },
+    },
+  },
+};
+

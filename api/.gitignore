@@ -4,3 +4,6 @@ postman/local.postman_environment.json
 test-results/
 coverage/
 *.log
+scripts/.kyc-local-store.json
+.kyc-local-store.json
+

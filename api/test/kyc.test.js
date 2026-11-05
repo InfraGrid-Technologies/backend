@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import Fastify from 'fastify';
 import kycModule from '../src/modules/kyc/index.js';
 import { MockKycProvider } from '../src/modules/kyc/providers/mock.provider.js';
@@ -11,20 +12,50 @@ import {
   evaluateAadhaarCompliance,
 } from '../src/modules/kyc/kyc.compliance.js';
 
-// In-memory mock repository to test caching and DB queries without requiring a live Postgres instance
+// In-memory mock repository to test caching, DB queries, and consent records without requiring a live Postgres instance
 function createMockRepository() {
   const verifications = [];
   const logs = [];
+  const consents = [];
 
   return {
     verifications,
     logs,
+    consents,
     async findRecentVerification(verificationType, idNumber) {
       return verifications.find(
         v => v.verification_type === verificationType && v.id_number === idNumber && v.status === 'verified'
       ) || null;
     },
-    async saveVerification({ verificationType, idNumber, status, provider, responseData, rawResponse, actorId }) {
+    async recordConsent({ actorId, consentType, purpose, noticeVersion, noticeText, ipAddress, userAgent }) {
+      const record = {
+        id: randomUUID(),
+        actor_id: actorId || null,
+        consent_type: consentType,
+        purpose: purpose || 'IDENTITY_AND_COMPLIANCE_VERIFICATION',
+        notice_version: noticeVersion,
+        notice_text: noticeText || 'Standard platform compliance consent',
+        ip_address: ipAddress || '0.0.0.0',
+        user_agent: userAgent || null,
+        status: 'GRANTED',
+        granted_at: new Date().toISOString(),
+        revoked_at: null,
+      };
+      consents.push(record);
+      return record;
+    },
+    async getConsentById(consentId) {
+      return consents.find(c => c.id === consentId) || null;
+    },
+    async revokeConsent(consentId, actorId) {
+      const record = consents.find(c => c.id === consentId && c.status === 'GRANTED');
+      if (!record) return null;
+      if (actorId && record.actor_id && record.actor_id !== actorId) return null;
+      record.status = 'REVOKED';
+      record.revoked_at = new Date().toISOString();
+      return { id: record.id, status: record.status, revoked_at: record.revoked_at };
+    },
+    async saveVerification({ verificationType, idNumber, status, provider, responseData, rawResponse, actorId, consentId }) {
       const record = {
         id: 'mock-uuid-' + (verifications.length + 1),
         verification_type: verificationType,
@@ -34,6 +65,7 @@ function createMockRepository() {
         response_data: responseData,
         raw_provider_response: rawResponse,
         actor_id: actorId,
+        consent_id: consentId || null,
         created_at: new Date().toISOString(),
       };
       verifications.push(record);
@@ -45,6 +77,14 @@ function createMockRepository() {
     async getHistory(verificationType, idNumber) {
       return verifications.filter(v => v.verification_type === verificationType && v.id_number === idNumber);
     },
+    async clearCache(verificationType, idNumber) {
+      if (verificationType && idNumber) {
+        const idx = verifications.findIndex(v => v.verification_type === verificationType && v.id_number === idNumber);
+        if (idx !== -1) verifications.splice(idx, 1);
+      } else {
+        verifications.length = 0;
+      }
+    },
   };
 }
 
@@ -54,18 +94,15 @@ async function buildTestApp(customRepo) {
     ajv: { customOptions: { removeAdditional: false, coerceTypes: false, useDefaults: false, allErrors: true } },
   });
 
-  // Mock database object for the module
-  const mockDb = {
-    pool: { query: async () => ({ rows: [] }) },
-  };
+  const repo = customRepo || createMockRepository();
 
   await app.register(kycModule, {
     config: { kycProvider: 'mock' },
-    db: mockDb,
+    repo,
   });
 
   await app.ready();
-  return app;
+  return { app, repo };
 }
 
 test('KYC Mock Provider - Unit Tests', async (t) => {
@@ -133,54 +170,107 @@ test('KYC Service - Caching & Zero-Cost Deduplication', async (t) => {
   const repo = createMockRepository();
   const service = createKycService(provider, repo);
 
-  await t.test('First DL check hits PROVIDER and caches to DB', async () => {
-    const res = await service.verifyDrivingLicense({ dlNumber: 'MH1420110062821', dob: '1990-05-15' }, 'test-user');
+  await t.test('First DL check hits PROVIDER and caches to DB with consent', async () => {
+    const res = await service.verifyDrivingLicense(
+      { dlNumber: 'MH1420110062821', dob: '1990-05-15', consent: { agreed: true, noticeVersion: 'DL_V1.0' } },
+      'test-user'
+    );
     assert.equal(res.source, 'PROVIDER');
     assert.equal(res.success, true);
+    assert.ok(res.consentId);
     assert.equal(repo.verifications.length, 1);
     assert.equal(repo.logs.length, 1);
+    assert.equal(repo.consents.length, 1);
   });
 
-  await t.test('Second DL check returns from CACHE (₹0 cost, no provider call)', async () => {
-    const res = await service.verifyDrivingLicense({ dlNumber: 'MH1420110062821', dob: '1990-05-15' }, 'test-user');
+  await t.test('Second DL check returns from CACHE (₹0 cost, records new consent)', async () => {
+    const res = await service.verifyDrivingLicense(
+      { dlNumber: 'MH1420110062821', dob: '1990-05-15', consent: { agreed: true, noticeVersion: 'DL_V1.0' } },
+      'test-user'
+    );
     assert.equal(res.source, 'CACHE');
     assert.equal(res.success, true);
-    // Verifications and API logs count did not increase!
+    assert.ok(res.consentId);
+    // Verifications and API logs count did not increase (cached), but consent artifact was captured!
     assert.equal(repo.verifications.length, 1);
     assert.equal(repo.logs.length, 1);
+    assert.equal(repo.consents.length, 2);
   });
 
   await t.test('RC caching also prevents duplicate provider calls', async () => {
-    const res1 = await service.verifyRc({ vehicleNumber: 'MH12AB1234' }, 'test-user');
+    const res1 = await service.verifyRc(
+      { vehicleNumber: 'MH12AB1234', consent: { agreed: true, noticeVersion: 'RC_V1.0' } },
+      'test-user'
+    );
     assert.equal(res1.source, 'PROVIDER');
+    assert.ok(res1.consentId);
 
-    const res2 = await service.verifyRc({ vehicleNumber: 'MH12AB1234' }, 'test-user');
+    const res2 = await service.verifyRc(
+      { vehicleNumber: 'MH12AB1234', consent: { agreed: true, noticeVersion: 'RC_V1.0' } },
+      'test-user'
+    );
     assert.equal(res2.source, 'CACHE');
+    assert.ok(res2.consentId);
   });
 
   await t.test('Challan caching prevents duplicate provider calls (₹0 cost)', async () => {
-    const res1 = await service.verifyChallan({ rcNumber: 'HR55AP0244' }, 'test-user');
+    const res1 = await service.verifyChallan(
+      { rcNumber: 'HR55AP0244', consent: { agreed: true, noticeVersion: 'CHALLAN_V1.0' } },
+      'test-user'
+    );
     assert.equal(res1.source, 'PROVIDER');
     assert.equal(res1.data.pendingChallansCount, 1);
+    assert.ok(res1.consentId);
 
-    const res2 = await service.verifyChallan({ rcNumber: 'HR55AP0244' }, 'test-user');
+    const res2 = await service.verifyChallan(
+      { rcNumber: 'HR55AP0244', consent: { agreed: true, noticeVersion: 'CHALLAN_V1.0' } },
+      'test-user'
+    );
     assert.equal(res2.source, 'CACHE');
     assert.equal(res2.data.pendingChallansCount, 1);
+    assert.ok(res2.consentId);
   });
 });
 
 test('KYC HTTP Endpoints - Schema Validation & Routes', async (t) => {
-  const app = await buildTestApp();
+  const { app } = await buildTestApp();
 
-  await t.test('POST /v1/kyc/driving-license - Valid request succeeds with heavy equipment compliance', async () => {
+  await t.test('POST /v1/kyc/driving-license - Missing consent is rejected with 400 (DPDP Guard)', async () => {
     const response = await app.inject({
       method: 'POST',
       url: '/v1/kyc/driving-license',
-      payload: { dlNumber: 'MH1420110062821', dob: '1990-05-15' },
+      payload: { dlNumber: 'MH1420110062821', dob: '1990-05-15' }, // missing consent
+    });
+    assert.equal(response.statusCode, 400);
+  });
+
+  await t.test('POST /v1/kyc/driving-license - Consent with agreed:false is rejected with 400', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/kyc/driving-license',
+      payload: {
+        dlNumber: 'MH1420110062821',
+        dob: '1990-05-15',
+        consent: { agreed: false, noticeVersion: 'DL_V1.0' },
+      },
+    });
+    assert.equal(response.statusCode, 400);
+  });
+
+  await t.test('POST /v1/kyc/driving-license - Valid request succeeds with heavy equipment compliance & consent', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/kyc/driving-license',
+      payload: {
+        dlNumber: 'MH1420110062821',
+        dob: '1990-05-15',
+        consent: { agreed: true, noticeVersion: 'DL_V1.0', noticeText: 'I agree to DL verification' },
+      },
     });
     assert.equal(response.statusCode, 200);
     const json = response.json();
     assert.equal(json.success, true);
+    assert.ok(json.consentId);
     assert.equal(json.data.name, 'RAJESH KUMAR SHARMA');
     assert.equal(json.data.compliance.isOriginalAndActive, true);
     assert.equal(json.data.compliance.isHeavyEquipmentAuthorized, true);
@@ -192,20 +282,30 @@ test('KYC HTTP Endpoints - Schema Validation & Routes', async (t) => {
     const response = await app.inject({
       method: 'POST',
       url: '/v1/kyc/driving-license',
-      payload: { dlNumber: 'MH1420110062821', dob: '15-05-1990' }, // Invalid format (not YYYY-MM-DD)
+      payload: {
+        dlNumber: 'MH1420110062821',
+        dob: '15-05-1990',
+        consent: { agreed: true, noticeVersion: 'DL_V1.0' },
+      },
     });
     assert.equal(response.statusCode, 400);
   });
 
-  await t.test('POST /v1/kyc/bank-account - Valid account & IFSC succeeds', async () => {
+  await t.test('POST /v1/kyc/bank-account - Valid account & IFSC succeeds with consent', async () => {
     const response = await app.inject({
       method: 'POST',
       url: '/v1/kyc/bank-account',
-      payload: { accountNumber: '987654321012', ifsc: 'HDFC0000240', nameToMatch: 'Rajesh Sharma' },
+      payload: {
+        accountNumber: '987654321012',
+        ifsc: 'HDFC0000240',
+        nameToMatch: 'Rajesh Sharma',
+        consent: { agreed: true, noticeVersion: 'BANK_V1.0' },
+      },
     });
     assert.equal(response.statusCode, 200);
     const json = response.json();
     assert.equal(json.success, true);
+    assert.ok(json.consentId);
     assert.equal(json.data.beneficiaryName, 'RAJESH KUMAR SHARMA');
     assert.equal(json.data.nameMatch.isMatch, true);
     assert.ok(json.data.nameMatch.score >= 60);
@@ -215,20 +315,28 @@ test('KYC HTTP Endpoints - Schema Validation & Routes', async (t) => {
     const response = await app.inject({
       method: 'POST',
       url: '/v1/kyc/bank-account',
-      payload: { accountNumber: '987654321012', ifsc: 'INVALID_IFSC' },
+      payload: {
+        accountNumber: '987654321012',
+        ifsc: 'INVALID_IFSC',
+        consent: { agreed: true, noticeVersion: 'BANK_V1.0' },
+      },
     });
     assert.equal(response.statusCode, 400);
   });
 
-  await t.test('POST /v1/kyc/rc - Valid vehicle number returns full RC & compliance', async () => {
+  await t.test('POST /v1/kyc/rc - Valid vehicle number returns full RC & compliance with consent', async () => {
     const response = await app.inject({
       method: 'POST',
       url: '/v1/kyc/rc',
-      payload: { vehicleNumber: 'MH12AB1234' },
+      payload: {
+        vehicleNumber: 'MH12AB1234',
+        consent: { agreed: true, noticeVersion: 'RC_V1.0' },
+      },
     });
     assert.equal(response.statusCode, 200);
     const json = response.json();
     assert.equal(json.success, true);
+    assert.ok(json.consentId);
     assert.equal(json.data.fitness.status, 'ACTIVE');
     assert.equal(json.data.puc.status, 'ACTIVE');
     assert.equal(json.data.insurance.status, 'ACTIVE');
@@ -241,7 +349,10 @@ test('KYC HTTP Endpoints - Schema Validation & Routes', async (t) => {
     const response = await app.inject({
       method: 'POST',
       url: '/v1/kyc/rc',
-      payload: { vehicleNumber: '123' },
+      payload: {
+        vehicleNumber: '123',
+        consent: { agreed: true, noticeVersion: 'RC_V1.0' },
+      },
     });
     assert.equal(response.statusCode, 400);
   });
@@ -250,7 +361,10 @@ test('KYC HTTP Endpoints - Schema Validation & Routes', async (t) => {
     const initResponse = await app.inject({
       method: 'POST',
       url: '/v1/kyc/aadhaar/initiate',
-      payload: { redirectUrl: 'http://localhost:3100/callback' },
+      payload: {
+        redirectUrl: 'http://localhost:3100/callback',
+        consent: { agreed: true, noticeVersion: 'AADHAAR_V1.0' },
+      },
     });
     assert.equal(initResponse.statusCode, 200);
     const initJson = initResponse.json();
@@ -270,15 +384,21 @@ test('KYC HTTP Endpoints - Schema Validation & Routes', async (t) => {
     assert.equal(getJson.data.compliance.checks.isAdult, true);
   });
 
-  await t.test('POST /v1/kyc/challan - Valid RC number returns challans and defaults all state portals', async () => {
+  await t.test('POST /v1/kyc/challan - Valid RC number returns challans with consent', async () => {
     const response = await app.inject({
       method: 'POST',
       url: '/v1/kyc/challan',
-      payload: { rcNumber: 'HR55AP0244', chassisNumber: 'MA3JMTB1SPB851591', engineNumber: 'K10CNC265773' },
+      payload: {
+        rcNumber: 'HR55AP0244',
+        chassisNumber: 'MA3JMTB1SPB851591',
+        engineNumber: 'K10CNC265773',
+        consent: { agreed: true, noticeVersion: 'CHALLAN_V1.0' },
+      },
     });
     assert.equal(response.statusCode, 200);
     const json = response.json();
     assert.equal(json.success, true);
+    assert.ok(json.consentId);
     assert.equal(json.data.rcNumber, 'HR55AP0244');
     assert.equal(json.data.hasPendingChallans, true);
     assert.equal(json.data.compliance.isClean, false);
@@ -292,9 +412,87 @@ test('KYC HTTP Endpoints - Schema Validation & Routes', async (t) => {
     const response = await app.inject({
       method: 'POST',
       url: '/v1/kyc/challan',
-      payload: { rcNumber: 'INVALID_RC_123' },
+      payload: {
+        rcNumber: 'INVALID_RC_123',
+        consent: { agreed: true, noticeVersion: 'CHALLAN_V1.0' },
+      },
     });
     assert.equal(response.statusCode, 400);
+  });
+
+  await t.test('GET /v1/kyc/consents/:consentId & POST /v1/kyc/consents/:consentId/revoke', async () => {
+    // 1. Create a verification with consent
+    const dlResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/kyc/driving-license',
+      payload: {
+        dlNumber: 'MH1420110062821',
+        dob: '1990-05-15',
+        consent: {
+          agreed: true,
+          noticeVersion: 'DL_NOTICE_V1.0',
+          noticeText: 'I authorize verification of my driving license for heavy machinery operation.',
+        },
+      },
+    });
+    const { consentId } = dlResponse.json();
+    assert.ok(consentId);
+
+    // 2. Fetch the immutable consent artifact for legal/audit review
+    const consentRes = await app.inject({
+      method: 'GET',
+      url: `/v1/kyc/consents/${consentId}`,
+    });
+    assert.equal(consentRes.statusCode, 200);
+    const consentJson = consentRes.json();
+    assert.equal(consentJson.success, true);
+    assert.equal(consentJson.data.id, consentId);
+    assert.equal(consentJson.data.consent_type, 'driving_license');
+    assert.equal(consentJson.data.status, 'GRANTED');
+    assert.equal(consentJson.data.notice_version, 'DL_NOTICE_V1.0');
+
+    // 3. Revoke consent under DPDP Act 2023 Section 6(4)
+    const revokeRes = await app.inject({
+      method: 'POST',
+      url: `/v1/kyc/consents/${consentId}/revoke`,
+    });
+    assert.equal(revokeRes.statusCode, 200);
+    const revokeJson = revokeRes.json();
+    assert.equal(revokeJson.success, true);
+    assert.equal(revokeJson.data.status, 'REVOKED');
+    assert.ok(revokeJson.data.revoked_at);
+
+    // 4. Verify status is now REVOKED on subsequent lookups
+    const recheckRes = await app.inject({
+      method: 'GET',
+      url: `/v1/kyc/consents/${consentId}`,
+    });
+    assert.equal(recheckRes.json().data.status, 'REVOKED');
+  });
+
+  await t.test('GET /v1/kyc/history/:type/:idNumber - Fetches audit log (₹0 cost) with underscores or hyphens', async () => {
+    // 1. Query with underscore
+    const histRes1 = await app.inject({
+      method: 'GET',
+      url: '/v1/kyc/history/driving_license/MH1420110062821',
+    });
+    assert.equal(histRes1.statusCode, 200);
+    const histJson1 = histRes1.json();
+    assert.equal(histJson1.success, true);
+    assert.ok(Array.isArray(histJson1.data));
+    assert.ok(histJson1.data.length > 0);
+    assert.equal(histJson1.data[0].id_number, 'MH1420110062821');
+
+    // 2. Query with hyphen (e.g. driving-license)
+    const histRes2 = await app.inject({
+      method: 'GET',
+      url: '/v1/kyc/history/driving-license/MH1420110062821',
+    });
+    assert.equal(histRes2.statusCode, 200);
+    const histJson2 = histRes2.json();
+    assert.equal(histJson2.success, true);
+    assert.ok(histJson2.data.length > 0);
+    assert.equal(histJson2.data[0].id_number, 'MH1420110062821');
   });
 
   await app.close();

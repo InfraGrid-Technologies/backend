@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 /**
  * KYC Repository
  * Manages database operations for KYC verification caching and audit logs.
@@ -12,7 +14,7 @@ export function createKycRepository(db) {
      */
     async findRecentVerification(verificationType, idNumber, maxAgeDays = 30) {
       const sql = `
-        SELECT id, verification_type, id_number, status, provider, response_data, raw_provider_response, created_at
+        SELECT id, verification_type, id_number, status, provider, response_data, raw_provider_response, consent_id, created_at
         FROM kyc.verifications
         WHERE verification_type = $1
           AND id_number = $2
@@ -22,6 +24,72 @@ export function createKycRepository(db) {
         LIMIT 1;
       `;
       const { rows } = await query(sql, [verificationType, idNumber, maxAgeDays.toString()]);
+      return rows[0] || null;
+    },
+
+    /**
+     * Record an immutable user consent artifact under DPDP Act 2023
+     */
+    async recordConsent({ actorId, consentType, purpose, noticeVersion, noticeText, ipAddress, userAgent }) {
+      const sql = `
+        INSERT INTO kyc.consents (
+          actor_id, consent_type, purpose, notice_version, notice_text, ip_address, user_agent
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING id, actor_id, consent_type, purpose, notice_version, notice_text, ip_address, user_agent, status, granted_at, revoked_at;
+      `;
+      const { rows } = await query(sql, [
+        actorId || null,
+        consentType,
+        purpose || 'IDENTITY_AND_COMPLIANCE_VERIFICATION',
+        noticeVersion,
+        noticeText || 'Standard platform compliance consent',
+        ipAddress || '0.0.0.0',
+        userAgent || null,
+      ]);
+      return rows[0] || {
+        id: randomUUID(),
+        actor_id: actorId || null,
+        consent_type: consentType,
+        purpose: purpose || 'IDENTITY_AND_COMPLIANCE_VERIFICATION',
+        notice_version: noticeVersion,
+        notice_text: noticeText || 'Standard platform compliance consent',
+        ip_address: ipAddress || '0.0.0.0',
+        user_agent: userAgent || null,
+        status: 'GRANTED',
+        granted_at: new Date().toISOString(),
+        revoked_at: null,
+      };
+    },
+
+    /**
+     * Fetch consent artifact by ID
+     */
+    async getConsentById(consentId) {
+      const sql = `
+        SELECT id, actor_id, consent_type, purpose, notice_version, notice_text, ip_address, user_agent, status, granted_at, revoked_at
+        FROM kyc.consents
+        WHERE id = $1;
+      `;
+      const { rows } = await query(sql, [consentId]);
+      return rows[0] || null;
+    },
+
+    /**
+     * Revoke user consent under DPDP Act 2023 Section 6(4)
+     */
+    async revokeConsent(consentId, actorId = null) {
+      let sql = `
+        UPDATE kyc.consents
+        SET status = 'REVOKED', revoked_at = clock_timestamp()
+        WHERE id = $1 AND status = 'GRANTED'
+      `;
+      const params = [consentId];
+      if (actorId) {
+        sql += ` AND actor_id = $2`;
+        params.push(actorId);
+      }
+      sql += ` RETURNING id, status, revoked_at;`;
+      const { rows } = await query(sql, params);
       return rows[0] || null;
     },
 
@@ -39,14 +107,14 @@ export function createKycRepository(db) {
     },
 
     /**
-     * Store new verification result
+     * Store new verification result with linked consent_id
      */
-    async saveVerification({ verificationType, idNumber, status, provider, responseData, rawResponse, actorId }) {
+    async saveVerification({ verificationType, idNumber, status, provider, responseData, rawResponse, actorId, consentId }) {
       const sql = `
         INSERT INTO kyc.verifications (
-          verification_type, id_number, status, provider, response_data, raw_provider_response, actor_id
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-        RETURNING id, verification_type, id_number, status, provider, response_data, created_at;
+          verification_type, id_number, status, provider, response_data, raw_provider_response, actor_id, consent_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING id, verification_type, id_number, status, provider, response_data, consent_id, created_at;
       `;
       const { rows } = await query(sql, [
         verificationType,
@@ -56,6 +124,7 @@ export function createKycRepository(db) {
         JSON.stringify(responseData || {}),
         rawResponse ? JSON.stringify(rawResponse) : null,
         actorId || null,
+        consentId || null,
       ]);
       return rows[0];
     },
@@ -89,7 +158,7 @@ export function createKycRepository(db) {
      */
     async getHistory(verificationType, idNumber) {
       const sql = `
-        SELECT id, verification_type, id_number, status, provider, response_data, created_at
+        SELECT id, verification_type, id_number, status, provider, response_data, consent_id, created_at
         FROM kyc.verifications
         WHERE verification_type = $1 AND id_number = $2
         ORDER BY created_at DESC;

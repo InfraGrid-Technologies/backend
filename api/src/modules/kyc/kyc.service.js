@@ -42,11 +42,35 @@ export function createKycService(provider, repo, logger) {
   const isPaidProvider = provider.providerName !== 'mock';
   const ESTIMATED_CALL_COST = isPaidProvider ? 15.00 : 0.00;
 
+  /**
+   * Helper to validate and record explicit user consent under DPDP Act 2023
+   */
+  async function recordUserConsent(consent, consentType, defaultPurpose, actorId, clientMeta) {
+    if (!consent || consent.agreed !== true) {
+      throw new ApiError(422, 'CONSENT_REQUIRED', `Explicit user consent is mandatory under DPDP Act 2023 to verify ${consentType.replaceAll('_', ' ')}.`);
+    }
+
+    const consentRecord = await repo.recordConsent({
+      actorId,
+      consentType,
+      purpose: defaultPurpose || 'IDENTITY_AND_COMPLIANCE_VERIFICATION',
+      noticeVersion: consent.noticeVersion || 'DEFAULT_V1.0',
+      noticeText: consent.noticeText || `User authorized verification for ${consentType}`,
+      ipAddress: clientMeta?.ip || '0.0.0.0',
+      userAgent: clientMeta?.userAgent || null,
+    });
+
+    logger?.info({ consentId: consentRecord?.id, consentType, actorId }, '[KycService] User consent recorded successfully');
+    return consentRecord?.id || null;
+  }
+
   return {
     /**
-     * 1. Verify Driving License (with 30-day cache check)
+     * 1. Verify Driving License (with 30-day cache check and consent audit)
      */
-    async verifyDrivingLicense({ dlNumber, dob, forceRefresh = false }, actorId) {
+    async verifyDrivingLicense({ dlNumber, dob, consent, forceRefresh = false }, actorId, clientMeta = {}) {
+      // Record immutable consent artifact first
+      const consentId = await recordUserConsent(consent, 'driving_license', 'OPERATOR_EQUIPMENT_ELIGIBILITY', actorId, clientMeta);
       const cleanDl = dlNumber.replaceAll(/[\s-]/g, '').toUpperCase();
 
       // Check cache first unless forceRefresh is true
@@ -73,18 +97,19 @@ export function createKycService(provider, repo, logger) {
           // Dynamically evaluate compliance against current date
           responseData.compliance = evaluateDriverLicenseCompliance(responseData);
 
-          logger?.info({ dlNumber: cleanDl }, '[KycService] Returning Driving License from CACHE (₹0 cost)');
+          logger?.info({ dlNumber: cleanDl, consentId }, '[KycService] Returning Driving License from CACHE (₹0 cost)');
           return {
             success: true,
             source: 'CACHE',
             provider: cached.provider,
+            consentId,
             data: responseData,
           };
         }
       }
 
       // Call external provider
-      logger?.info({ dlNumber: cleanDl, provider: provider.providerName }, '[KycService] Calling KYC provider for DL');
+      logger?.info({ dlNumber: cleanDl, provider: provider.providerName, consentId }, '[KycService] Calling KYC provider for DL');
       const result = await provider.verifyDrivingLicense({ dlNumber: cleanDl, dob });
 
       // Evaluate compliance rules (RTO authenticity + heavy equipment authorization)
@@ -102,7 +127,7 @@ export function createKycService(provider, repo, logger) {
         responsePayload: result.raw,
       });
 
-      // Save verification
+      // Save verification with linked consentId
       await repo.saveVerification({
         verificationType: 'driving_license',
         idNumber: cleanDl,
@@ -111,6 +136,7 @@ export function createKycService(provider, repo, logger) {
         responseData: result.data,
         rawResponse: result.raw,
         actorId,
+        consentId,
       });
 
       if (!result.success) {
@@ -121,14 +147,16 @@ export function createKycService(provider, repo, logger) {
         success: true,
         source: 'PROVIDER',
         provider: result.provider,
+        consentId,
         data: result.data,
       };
     },
 
     /**
-     * 2. Verify Bank Account (Penny Drop with cache check)
+     * 2. Verify Bank Account (Penny Drop with cache check and consent audit)
      */
-    async verifyBankAccount({ accountNumber, ifsc, nameToMatch, forceRefresh = false }, actorId) {
+    async verifyBankAccount({ accountNumber, ifsc, nameToMatch, consent, forceRefresh = false }, actorId, clientMeta = {}) {
+      const consentId = await recordUserConsent(consent, 'bank_account', 'PAYOUT_BENEFICIARY_VALIDATION', actorId, clientMeta);
       const cleanAcc = accountNumber.trim();
       const cleanIfsc = ifsc.replaceAll(/\s/g, '').toUpperCase();
       const cacheKey = `${cleanAcc}_${cleanIfsc}`;
@@ -137,7 +165,7 @@ export function createKycService(provider, repo, logger) {
       if (!forceRefresh) {
         const cached = await repo.findRecentVerification('bank_account', cacheKey);
         if (cached) {
-          logger?.info({ cacheKey }, '[KycService] Returning Bank Account from CACHE (₹0 cost)');
+          logger?.info({ cacheKey, consentId }, '[KycService] Returning Bank Account from CACHE (₹0 cost)');
           const data = { ...cached.response_data };
           if (nameToMatch && data.beneficiaryName) {
             data.nameMatch = computeNameMatch(nameToMatch, data.beneficiaryName);
@@ -146,12 +174,13 @@ export function createKycService(provider, repo, logger) {
             success: true,
             source: 'CACHE',
             provider: cached.provider,
+            consentId,
             data,
           };
         }
       }
 
-      logger?.info({ cacheKey, provider: provider.providerName }, '[KycService] Calling KYC provider for Bank Verification');
+      logger?.info({ cacheKey, provider: provider.providerName, consentId }, '[KycService] Calling KYC provider for Bank Verification');
       const result = await provider.verifyBankAccount({ accountNumber: cleanAcc, ifsc: cleanIfsc });
 
       await repo.logApiCall({
@@ -171,6 +200,7 @@ export function createKycService(provider, repo, logger) {
         responseData: result.data,
         rawResponse: result.raw,
         actorId,
+        consentId,
       });
 
       if (!result.success) {
@@ -186,14 +216,16 @@ export function createKycService(provider, repo, logger) {
         success: true,
         source: 'PROVIDER',
         provider: result.provider,
+        consentId,
         data: responseData,
       };
     },
 
     /**
-     * 3. Verify Vehicle RC (PUC, Fitness, Insurance with cache check)
+     * 3. Verify Vehicle RC (PUC, Fitness, Insurance with cache check and consent audit)
      */
-    async verifyRc({ vehicleNumber, forceRefresh = false }, actorId) {
+    async verifyRc({ vehicleNumber, consent, forceRefresh = false }, actorId, clientMeta = {}) {
+      const consentId = await recordUserConsent(consent, 'rc', 'FLEET_VEHICLE_ONBOARDING', actorId, clientMeta);
       const cleanRc = vehicleNumber.replaceAll(/[\s-]/g, '').toUpperCase();
 
       // Check cache first unless forceRefresh is true
@@ -204,17 +236,18 @@ export function createKycService(provider, repo, logger) {
           // Dynamically evaluate compliance against current date
           responseData.compliance = evaluateVehicleCompliance(responseData);
 
-          logger?.info({ vehicleNumber: cleanRc }, '[KycService] Returning Vehicle RC from CACHE (₹0 cost)');
+          logger?.info({ vehicleNumber: cleanRc, consentId }, '[KycService] Returning Vehicle RC from CACHE (₹0 cost)');
           return {
             success: true,
             source: 'CACHE',
             provider: cached.provider,
+            consentId,
             data: responseData,
           };
         }
       }
 
-      logger?.info({ vehicleNumber: cleanRc, provider: provider.providerName }, '[KycService] Calling KYC provider for RC');
+      logger?.info({ vehicleNumber: cleanRc, provider: provider.providerName, consentId }, '[KycService] Calling KYC provider for RC');
       const result = await provider.verifyRc({ vehicleNumber: cleanRc });
 
       // Evaluate compliance rules (Active registration + Fitness + PUC + Insurance)
@@ -239,6 +272,7 @@ export function createKycService(provider, repo, logger) {
         responseData: result.data,
         rawResponse: result.raw,
         actorId,
+        consentId,
       });
 
       if (!result.success) {
@@ -249,6 +283,7 @@ export function createKycService(provider, repo, logger) {
         success: true,
         source: 'PROVIDER',
         provider: result.provider,
+        consentId,
         data: result.data,
       };
     },
@@ -256,7 +291,9 @@ export function createKycService(provider, repo, logger) {
     /**
      * 4. Initiate DigiLocker Aadhaar Verification session
      */
-    async initiateAadhaar({ redirectUrl, logoUrl, signupFlow, skipMainScreen }, actorId) {
+    async initiateAadhaar({ redirectUrl, logoUrl, signupFlow, skipMainScreen, consent }, actorId, clientMeta = {}) {
+      const consentId = await recordUserConsent(consent, 'aadhaar', 'AADHAAR_DIGILOCKER_VERIFICATION', actorId, clientMeta);
+
       const result = await provider.initiateAadhaarDigilocker({
         redirectUrl: redirectUrl || 'https://google.com',
         logoUrl: logoUrl || 'https://surepass.io/assets/images/logo.png',
@@ -287,12 +324,14 @@ export function createKycService(provider, repo, logger) {
           responseData: result.data,
           rawResponse: result.raw,
           actorId,
+          consentId,
         });
       }
 
       return {
         success: true,
         provider: result.provider,
+        consentId: consentId || undefined,
         data: result.data,
       };
     },
@@ -351,9 +390,10 @@ export function createKycService(provider, repo, logger) {
     },
 
     /**
-     * 6. Verify Vehicle E-Challans across national and state portals (with 30-day cache check)
+     * 6. Verify Vehicle E-Challans across national and state portals (with 30-day cache check and consent audit)
      */
-    async verifyChallan({ rcNumber, chassisNumber, engineNumber, stateOnly = false, statePortals, forceRefresh = false }, actorId) {
+    async verifyChallan({ rcNumber, chassisNumber, engineNumber, stateOnly = false, statePortals, consent, forceRefresh = false }, actorId, clientMeta = {}) {
+      const consentId = await recordUserConsent(consent, 'challan', 'VEHICLE_TRAFFIC_COMPLIANCE_CHECK', actorId, clientMeta);
       const cleanRc = rcNumber.replaceAll(/[\s-]/g, '').toUpperCase();
 
       // 1. Sanitize chassis & engine (ignore Swagger's dummy "string" placeholder)
@@ -382,17 +422,18 @@ export function createKycService(provider, repo, logger) {
         if (cached) {
           const responseData = { ...cached.response_data };
           responseData.compliance = evaluateChallanCompliance(responseData);
-          logger?.info({ rcNumber: cleanRc }, '[KycService] Returning E-Challan from CACHE (₹0 cost)');
+          logger?.info({ rcNumber: cleanRc, consentId }, '[KycService] Returning E-Challan from CACHE (₹0 cost)');
           return {
             success: true,
             source: 'CACHE',
             provider: cached.provider,
+            consentId,
             data: responseData,
           };
         }
       }
 
-      logger?.info({ rcNumber: cleanRc, provider: provider.providerName }, '[KycService] Calling KYC provider for E-Challan');
+      logger?.info({ rcNumber: cleanRc, provider: provider.providerName, consentId }, '[KycService] Calling KYC provider for E-Challan');
       const result = await provider.verifyChallan({
         rcNumber: cleanRc,
         chassisNumber: cleanChassis || '',
@@ -423,6 +464,7 @@ export function createKycService(provider, repo, logger) {
         responseData: result.data,
         rawResponse: result.raw,
         actorId,
+        consentId,
       });
 
       if (!result.success) {
@@ -433,6 +475,7 @@ export function createKycService(provider, repo, logger) {
         success: true,
         source: 'PROVIDER',
         provider: result.provider,
+        consentId,
         data: result.data,
       };
     },
@@ -452,6 +495,36 @@ export function createKycService(provider, repo, logger) {
       return {
         success: true,
         message: idNumber ? `Cache cleared for ${type} ${idNumber}` : 'All KYC cache cleared successfully',
+      };
+    },
+
+    /**
+     * 9. Get Consent Artifact Details by ID (DPDP Act Audit verification)
+     */
+    async getConsent(consentId) {
+      const record = await repo.getConsentById(consentId);
+      if (!record) {
+        throw new ApiError(404, 'CONSENT_NOT_FOUND', `Consent record ${consentId} not found.`);
+      }
+      return {
+        success: true,
+        data: record,
+      };
+    },
+
+    /**
+     * 10. Revoke User Consent (DPDP Act 2023 Section 6(4))
+     */
+    async revokeConsent(consentId, actorId) {
+      const revoked = await repo.revokeConsent(consentId, actorId);
+      if (!revoked) {
+        throw new ApiError(404, 'CONSENT_NOT_FOUND_OR_REVOKED', `Consent record ${consentId} not found or was already revoked.`);
+      }
+      logger?.info({ consentId, actorId }, '[KycService] User consent successfully revoked');
+      return {
+        success: true,
+        message: 'User consent revoked successfully under DPDP Act 2023 Section 6(4).',
+        data: revoked,
       };
     },
   };
