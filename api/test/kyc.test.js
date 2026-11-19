@@ -24,7 +24,7 @@ function createMockRepository() {
     consents,
     async findRecentVerification(verificationType, idNumber) {
       return verifications.find(
-        v => v.verification_type === verificationType && v.id_number === idNumber && v.status === 'verified'
+        v => v.verification_type === verificationType && v.id_number === idNumber
       ) || null;
     },
     async recordConsent({ actorId, consentType, purpose, noticeVersion, noticeText, ipAddress, userAgent }) {
@@ -76,6 +76,9 @@ function createMockRepository() {
     },
     async getHistory(verificationType, idNumber) {
       return verifications.filter(v => v.verification_type === verificationType && v.id_number === idNumber);
+    },
+    async getHeavyEquipmentCovCodes() {
+      return ['TRANS', 'HGMV', 'HMV', 'HTV', 'CRANE', 'EXCAVATOR', 'LOADER', 'FORKLIFT', 'ROAD_ROLLER', 'CONSTRUCTION_EQUIPMENT', 'CEV'];
     },
     async clearCache(verificationType, idNumber) {
       if (verificationType && idNumber) {
@@ -355,6 +358,29 @@ test('KYC HTTP Endpoints - Schema Validation & Routes', async (t) => {
       },
     });
     assert.equal(response.statusCode, 400);
+  });
+
+  await t.test('POST /v1/kyc/vehicle-inspection - Unified RC + Challan check in a single call', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/kyc/vehicle-inspection',
+      payload: {
+        vehicleNumber: 'MH12AB1234',
+        checkChallan: true,
+        consent: { agreed: true, noticeVersion: 'VEHICLE_INSPECTION_V1.0' },
+      },
+    });
+    assert.equal(response.statusCode, 200);
+    const json = response.json();
+    assert.equal(json.success, true);
+    assert.ok(json.consentId);
+    assert.ok(json.challanConsentId);
+    assert.equal(json.data.isUnified, true);
+    assert.equal(json.data.vehicleNumber, 'MH12AB1234');
+    assert.ok(json.data.chassisNumber);
+    assert.ok(json.data.engineNumber);
+    assert.equal(json.data.fitness.status, 'ACTIVE');
+    assert.equal(json.data.rcCompliance.isFullyCompliant, true);
   });
 
   await t.test('POST /v1/kyc/aadhaar/initiate & GET /v1/kyc/aadhaar/:clientId', async () => {
@@ -659,6 +685,105 @@ test('KYC Compliance Engine - Edge Cases & Violations', async (t) => {
     assert.equal(res3.verifiedBadge, false);
     assert.equal(res3.status, 'PENDING');
   });
+
+  await t.test('Vehicle RC: enforces expected vehicle category matching (Earthmoving vs Haulage vs Mismatch)', () => {
+    const commercialTipperRc = {
+      status: 'ACTIVE',
+      vehicleClass: 'Heavy Goods Commercial Vehicle (HGMV)',
+      fitness: { validTill: '2028-12-31' },
+      puc: { validTill: '2028-12-31' },
+      insurance: { validTill: '2028-12-31' },
+    };
+
+    // 1. Matches Commercial Haulage & Transport
+    const matchRes = evaluateVehicleCompliance(commercialTipperRc, '2026-11-03', 'Commercial Haulage & Transport');
+    assert.equal(matchRes.isFullyCompliant, true);
+    assert.equal(matchRes.checks.categoryMatch, true);
+    assert.equal(matchRes.violations.length, 0);
+
+    // 2. Fails when claiming Excavator/Earthmoving for a Tipper/Truck
+    const mismatchRes = evaluateVehicleCompliance(commercialTipperRc, '2026-11-03', 'Earthmoving & Excavation');
+    assert.equal(mismatchRes.isFullyCompliant, false);
+    assert.equal(mismatchRes.checks.categoryMatch, false);
+    assert.ok(mismatchRes.violations.some(v => v.includes('Vehicle category mismatch')));
+
+    // 3. Fails when private passenger car is submitted
+    const passengerCarRc = {
+      status: 'ACTIVE',
+      vehicleClass: 'Motor Car (LMV)',
+      fitness: { validTill: '2028-12-31' },
+      puc: { validTill: '2028-12-31' },
+      insurance: { validTill: '2028-12-31' },
+    };
+    const carRes = evaluateVehicleCompliance(passengerCarRc, '2026-11-03', 'Commercial Haulage & Transport');
+    assert.equal(carRes.isFullyCompliant, false);
+    assert.equal(carRes.checks.categoryMatch, false);
+    assert.ok(carRes.violations.some(v => v.includes('Vehicle category mismatch')));
+  });
+
+  await t.test('Vehicle RC: enforces RTO Vehicle Class matching for specific vehicle types (BookMyEquipment fleet)', () => {
+    const cevExcavatorRc = {
+      status: 'ACTIVE',
+      vehicleClass: 'Construction Equipment Vehicle (CEV)',
+      fitness: { validTill: '2028-12-31' },
+      puc: { validTill: '2028-12-31' },
+      insurance: { validTill: '2028-12-31' },
+    };
+
+    const hgmvTipperRc = {
+      status: 'ACTIVE',
+      vehicleClass: 'Heavy Goods Commercial Vehicle (HGMV)',
+      fitness: { validTill: '2028-12-31' },
+      puc: { validTill: '2028-12-31' },
+      insurance: { validTill: '2028-12-31' },
+    };
+
+    // 1. Excavator matches CEV
+    const cevMatch = evaluateVehicleCompliance(cevExcavatorRc, '2026-11-03', 'Earthmoving', 'Backhoe (JCB 3DX)');
+    assert.equal(cevMatch.isFullyCompliant, true);
+    assert.equal(cevMatch.checks.rtoClassMatch, true);
+
+    // 2. Tipper matches HGV/HGMV
+    const hgmvMatch = evaluateVehicleCompliance(hgmvTipperRc, '2026-11-03', 'Transport & Cranes', 'Tipper Dump Truck');
+    assert.equal(hgmvMatch.isFullyCompliant, true);
+    assert.equal(hgmvMatch.checks.rtoClassMatch, true);
+
+    // 3. Tipper RC provided for Backhoe (CEV required, HGMV provided) -> rejected with RTO class mismatch
+    const typeMismatch = evaluateVehicleCompliance(hgmvTipperRc, '2026-11-03', 'Earthmoving', 'Backhoe (JCB 3DX)');
+    assert.equal(typeMismatch.isFullyCompliant, false);
+    assert.equal(typeMismatch.checks.rtoClassMatch, false);
+    assert.ok(typeMismatch.violations.some(v => v.includes('Vehicle RTO class mismatch')));
+
+    // 4. CEV RC provided for Tipper (HGV required, CEV provided) -> rejected with RTO class mismatch
+    const tipperMismatch = evaluateVehicleCompliance(cevExcavatorRc, '2026-11-03', 'Transport & Cranes', 'Tipper Dump Truck');
+    assert.equal(tipperMismatch.isFullyCompliant, false);
+    assert.equal(tipperMismatch.checks.rtoClassMatch, false);
+    assert.ok(tipperMismatch.violations.some(v => v.includes('Vehicle RTO class mismatch')));
+  });
 });
+
+test('KYC AI OCR Pre-Validation - Document Format & Cross-Validation Guards', async (t) => {
+  const { validateDlDocumentImage, validateRcDocumentImage } = await import('../src/modules/kyc/ocr/local-ocr.js');
+
+  await t.test('Rejects corrupted / undersized buffers (< 2KB) early', async () => {
+    const tinyBuffer = Buffer.alloc(500);
+    const dlRes = await validateDlDocumentImage(tinyBuffer);
+    assert.equal(dlRes.isDocument, false);
+    assert.ok(dlRes.message.includes('too small or corrupted'));
+
+    const rcRes = await validateRcDocumentImage(tinyBuffer);
+    assert.equal(rcRes.isDocument, false);
+    assert.ok(rcRes.message.includes('too small or corrupted'));
+  });
+
+  await t.test('Rejects null / non-buffer gracefully', async () => {
+    const dlRes = await validateDlDocumentImage(null);
+    assert.equal(dlRes.isDocument, false);
+
+    const rcRes = await validateRcDocumentImage(undefined);
+    assert.equal(rcRes.isDocument, false);
+  });
+});
+
 
 

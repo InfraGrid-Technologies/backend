@@ -57,5 +57,23 @@ export class KycProviderInterface {
   async verifyChallan({ rcNumber, chassisNumber, engineNumber, statePortals }) {
     throw new Error('Method verifyChallan() not implemented.');
   }
+
+  /**
+   * Extract data from Vehicle RC document using AI OCR
+   * @param {{ fileBase64: string, mimeType?: string, fileUrl?: string }} params
+   * @returns {Promise<{ success: boolean, provider: string, data: { vehicleNumber?: string, engineNumber?: string, chassisNumber?: string, ownerName?: string, makerModel?: string }, raw: object }>}
+   */
+  async ocrVehicleRc({ fileBase64, mimeType, fileUrl }) {
+    throw new Error('Method ocrVehicleRc() not implemented.');
+  }
+
+  /**
+   * Extract data from Driving License document using AI OCR
+   * @param {{ fileBase64: string, mimeType?: string, fileUrl?: string }} params
+   * @returns {Promise<{ success: boolean, provider: string, data: { dlNumber?: string, dob?: string, name?: string, fatherOrHusbandName?: string }, raw: object }>}
+   */
+  async ocrDrivingLicense({ fileBase64, mimeType, fileUrl }) {
+    throw new Error('Method ocrDrivingLicense() not implemented.');
+  }
 }
 

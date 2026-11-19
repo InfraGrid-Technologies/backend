@@ -13,7 +13,7 @@ export function loadConfig(env=process.env) {
     kycProvider:env.KYC_PROVIDER||'mock',
     surepassToken:env.SUREPASS_TOKEN,
     surepassBaseUrl:env.SUREPASS_BASE_URL||'https://sandbox.surepass.app/api/v1',
-    db:{host:env.PGHOST||'127.0.0.1',port:int('PGPORT',55440,1,65535),
+    db:{host:env.PGHOST||'127.0.0.1',port:int('PGPORT',5434,1,65535),
         database:env.PGDATABASE||'equiprent_model',user:env.PGUSER||'equiprent_api',password:env.PGPASSWORD,
         max:int('DB_POOL_MAX',10,1,50),connectionTimeoutMillis:5000,idleTimeoutMillis:30000,
         application_name:'equiprent-model-api'}};

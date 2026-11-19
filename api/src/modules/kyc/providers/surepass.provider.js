@@ -1,5 +1,6 @@
 import { KycProviderInterface } from './kyc-provider.interface.js';
 import { ApiError } from '../../../errors.js';
+import { validateDlDocumentImage, validateRcDocumentImage } from '../ocr/local-ocr.js';
 
 /**
  * Surepass KYC Provider Adapter
@@ -15,6 +16,7 @@ export class SurepassKycProvider extends KycProviderInterface {
     this.providerName = 'surepass';
   }
 
+  
   /**
    * Helper to perform HTTP request to Surepass
    */
@@ -37,8 +39,13 @@ export class SurepassKycProvider extends KycProviderInterface {
     };
 
     if (body && method !== 'GET') {
-      headers['Content-Type'] = 'application/json';
-      options.body = JSON.stringify(body);
+      if (typeof FormData !== 'undefined' && body instanceof FormData) {
+        options.body = body;
+        // Do not set Content-Type header so fetch creates multipart/form-data with boundary
+      } else {
+        headers['Content-Type'] = 'application/json';
+        options.body = JSON.stringify(body);
+      }
     }
 
     let response;
@@ -136,13 +143,23 @@ export class SurepassKycProvider extends KycProviderInterface {
         name: d.name,
         dob: d.dob,
         status: d.status || 'ACTIVE',
-        validFrom: d.doi || d.valid_from,
-        validTill: d.doe || d.valid_till || d.non_transport_to,
-        issueDate: d.doi || d.issue_date,
-        rtoName: d.ola_name || d.rto,
-        fatherOrHusbandName: d.father_or_husband_name,
-        address: d.permanent_address || d.temporary_address,
+        gender: d.gender || null,
+        bloodGroup: d.blood_group || null,
+        fatherOrHusbandName: d.father_or_husband_name || null,
+        permanentAddress: d.permanent_address || d.address || null,
+        temporaryAddress: d.temporary_address || null,
+        address: d.permanent_address || d.temporary_address || null,
+        validFrom: d.doi || d.valid_from || null,
+        validTill: d.doe || d.valid_till || d.non_transport_to || null,
+        issueDate: d.doi || d.issue_date || null,
+        transportValidFrom: d.transport_from || d.transport_valid_from || null,
+        transportValidTill: d.transport_to || d.transport_valid_till || null,
+        rtoName: d.ola_name || d.rto || null,
+        rtoCode: d.ola_code || d.rto_code || null,
+        state: d.state || null,
         vehicleClasses,
+        badgeNumber: d.badge_number || null,
+        badgeIssueDate: d.badge_issue_date || null,
       },
       raw: result.raw,
     };
@@ -225,17 +242,33 @@ export class SurepassKycProvider extends KycProviderInterface {
       data: {
         vehicleNumber: d.rc_number || cleanRc,
         ownerName: d.owner_name,
+        fatherName: d.father_name || null,
+        presentAddress: d.present_address || null,
+        permanentAddress: d.permanent_address || null,
+        mobileNumber: d.mobile_number || null,
+        makerDescription: d.maker_description || null,
         makerModel: d.maker_model || `${d.maker_description || ''} ${d.maker_model || ''}`.trim(),
         vehicleClass: d.vehicle_category_description || d.vehicle_category || d.vehicle_class,
+        bodyType: d.body_type || null,
         fuelType: d.fuel_type,
+        color: d.color || null,
+        normsType: d.norms_type || null,
         engineNumber: d.vehicle_engine_number || d.engine_number,
         chassisNumber: d.vehicle_chasi_number || d.chassis_number,
+        cubicCapacity: Number(d.cubic_capacity) || null,
+        noCylinders: Number(d.no_cylinders) || null,
+        unladenWeight: Number(d.unladen_weight) || null,
+        vehicleGrossWeight: Number(d.vehicle_gross_weight) || null,
+        wheelbase: Number(d.wheelbase) || null,
+        manufacturingDate: d.manufacturing_date_formatted || d.manufacturing_date || null,
+        financer: d.financer || (d.financed ? 'FINANCED' : null),
+        taxUpto: d.tax_upto || d.tax_paid_upto || null,
         registrationDate: d.registration_date,
         rtoName: d.registered_at,
         status: d.rc_status || d.status || 'ACTIVE',
         fitness: {
-          status: d.fit_up_to ? 'ACTIVE' : 'UNKNOWN',
-          validTill: d.fit_up_to,
+          status: (d.fit_up_to || d.fitness_upto || d.rc_expiry_date || d.regn_upto) ? 'ACTIVE' : 'UNKNOWN',
+          validTill: d.fit_up_to || d.fitness_upto || d.rc_expiry_date || d.regn_upto || null,
         },
         insurance: {
           status: (d.insurance_upto || d.insurance_up_to) ? 'ACTIVE' : 'UNKNOWN',
@@ -249,9 +282,10 @@ export class SurepassKycProvider extends KycProviderInterface {
           validTill: d.pucc_upto,
         },
         nationalPermit: {
-          status: d.permit_valid_upto ? 'ACTIVE' : 'UNKNOWN',
-          permitNumber: d.permit_number || null,
-          validTill: d.permit_valid_upto,
+          status: (d.national_permit_upto || d.permit_valid_upto) ? 'ACTIVE' : 'UNKNOWN',
+          permitNumber: d.national_permit_number || d.permit_number || null,
+          validTill: d.national_permit_upto || d.permit_valid_upto || null,
+          type: d.permit_type || null,
         },
       },
       raw: result.raw,
@@ -263,11 +297,17 @@ export class SurepassKycProvider extends KycProviderInterface {
    * Endpoint: POST /api/v1/digilocker/initialize
    */
   async initiateAadhaarDigilocker({ redirectUrl, logoUrl, signupFlow, skipMainScreen }) {
+    // UIDAI & Surepass security policy requires HTTPS redirect URL; plain HTTP or localhost triggers 403 Forbidden
+    let sanitizedRedirect = redirectUrl;
+    if (!sanitizedRedirect || !sanitizedRedirect.startsWith('https://')) {
+      sanitizedRedirect = process.env.KYC_AADHAAR_CALLBACK_URL || 'https://surepass.io';
+    }
+
     const payload = {
       data: {
         signup_flow: signupFlow !== false,
         logo_url: logoUrl || 'https://surepass.io/assets/images/logo.png',
-        redirect_url: redirectUrl || 'https://google.com',
+        redirect_url: sanitizedRedirect,
         skip_main_screen: skipMainScreen === true,
       },
     };
@@ -360,22 +400,45 @@ export class SurepassKycProvider extends KycProviderInterface {
    */
   async verifyChallan({ rcNumber, chassisNumber, engineNumber, stateOnly = false, statePortals }) {
     const cleanRc = rcNumber.replaceAll(/[\s-]/g, '').toUpperCase();
-    const cleanChassis = (chassisNumber && chassisNumber !== 'string') ? chassisNumber.trim() : '';
-    const cleanEngine = (engineNumber && engineNumber !== 'string') ? engineNumber.trim() : '';
-    const portals = (statePortals && statePortals.length)
-      ? statePortals.filter(p => p !== 'DL_ALL')
-      : ['DL', 'TS', 'GJ'];
+    const homeState = cleanRc.slice(0, 2);
+
+    // Only send chassis and engine if genuine alphanumeric (no asterisks/masks)
+    const isValidAlphanumeric = (val) => val && typeof val === 'string' && /^[A-Z0-9]{5,}$/i.test(val.trim()) && !val.includes('*');
+    const cleanChassis = isValidAlphanumeric(chassisNumber) ? String(chassisNumber).trim().toUpperCase() : undefined;
+    const cleanEngine = isValidAlphanumeric(engineNumber) ? String(engineNumber).trim().toUpperCase() : undefined;
+
+    // Supported state portals in Surepass E-Challan API
+    const ALL_SUPPORTED_CHALLAN_PORTALS = [
+      'ALL', 'TS', 'AP', 'DL', 'GJ', 'MH', 'KA', 'TN', 'KL',
+      'UP', 'RJ', 'HR', 'MP', 'WB', 'PB', 'OD', 'CH',
+      'HP', 'JH', 'BR', 'CG', 'GA', 'AS',
+    ];
+
+    // Determine state portal query:
+    // Prioritize the vehicle's home state portal (e.g. TS) along with ALL so state traffic police backends are reliably queried
+    let portals = ALL_SUPPORTED_CHALLAN_PORTALS.includes(homeState) ? [homeState, 'ALL'] : ['ALL'];
+    if (statePortals && Array.isArray(statePortals) && statePortals.length > 0) {
+      const sanitized = statePortals.map(p => String(p).trim().toUpperCase());
+      if (sanitized.includes('ALL')) {
+        portals = ALL_SUPPORTED_CHALLAN_PORTALS.includes(homeState) ? [homeState, 'ALL'] : ['ALL'];
+      } else {
+        const filtered = sanitized.filter(p => ALL_SUPPORTED_CHALLAN_PORTALS.includes(p));
+        if (filtered.length > 0) {
+          portals = filtered;
+        }
+      }
+    }
 
     const payload = {
       rc_number: cleanRc,
-      chassis_number: cleanChassis,
-      engine_number: cleanEngine,
       state_only: stateOnly === true,
       state_portal: portals,
     };
+    if (cleanChassis) payload.chassis_number = cleanChassis;
+    if (cleanEngine) payload.engine_number = cleanEngine;
 
-    // KA portal takes ~30s on sandbox, so grant 60s timeout if KA is requested
-    const timeoutMs = portals.includes('KA') ? 60000 : 35000;
+    // Grant 60s timeout for multi-portal scans
+    const timeoutMs = 60000;
     const result = await this._request('/rc/rc-related/challan-details', payload, 'POST', timeoutMs);
 
     if (!result.success) {
@@ -396,22 +459,39 @@ export class SurepassKycProvider extends KycProviderInterface {
     const rawChallans = Array.isArray(challanDetails.challans)
       ? challanDetails.challans
       : (Array.isArray(d.challans) ? d.challans : []);
+    const failedBackends = Array.isArray(challanDetails.failed_backends)
+      ? challanDetails.failed_backends
+      : (Array.isArray(d.failed_backends) ? d.failed_backends : []);
+    const successfulBackends = Array.isArray(challanDetails.successful_backends)
+      ? challanDetails.successful_backends
+      : (Array.isArray(d.successful_backends) ? d.successful_backends : []);
 
-    const challans = rawChallans.map((c, idx) => ({
-      number: c.number ?? idx + 1,
-      challanNumber: c.challan_number || c.challanNumber || null,
-      offenseDetails: c.offense_details || c.offenseDetails || c.offense || null,
-      challanPlace: c.challan_place || c.challanPlace || null,
-      challanDate: c.challan_date || c.challanDate || null,
-      state: c.state || null,
-      amount: Number(c.amount ?? c.challan_amount ?? 0),
-      status: (c.status || c.challan_status || 'UNKNOWN').toUpperCase(),
-      paymentDate: c.payment_date || c.paymentDate || null,
-      transactionId: c.transaction_id || c.transactionId || null,
-    }));
+    const isChallanUnpaid = (status) => {
+      if (!status) return true;
+      const s = String(status).toUpperCase().replace(/[\s_-]+/g, '');
+      return s !== 'PAID' && s !== 'DISPOSED' && s !== 'SETTLED' && s !== 'CLEARED' && s !== 'CLOSED';
+    };
+
+    const challans = rawChallans.map((c, idx) => {
+      const rawStatus = (c.status || c.challan_status || 'UNKNOWN').toUpperCase().trim();
+      const isPending = isChallanUnpaid(rawStatus);
+      return {
+        number: c.number ?? idx + 1,
+        challanNumber: c.challan_number || c.challanNumber || null,
+        offenseDetails: c.offense_details || c.offenseDetails || c.offense || null,
+        challanPlace: c.challan_place || c.challanPlace || null,
+        challanDate: c.challan_date || c.challanDate || null,
+        state: c.state || null,
+        amount: Number(c.amount ?? c.challan_amount ?? 0),
+        status: isPending ? 'UNPAID' : 'PAID',
+        rawStatus,
+        paymentDate: c.payment_date || c.paymentDate || null,
+        transactionId: c.transaction_id || c.transactionId || null,
+      };
+    });
 
     const totalChallans = challans.length;
-    const pendingChallans = challans.filter(c => c.status === 'PENDING' || c.status === 'UNPAID');
+    const pendingChallans = challans.filter(c => isChallanUnpaid(c.status) || isChallanUnpaid(c.rawStatus));
     const pendingChallansCount = pendingChallans.length;
     const totalPendingAmount = pendingChallans.reduce((sum, c) => sum + (Number(c.amount) || 0), 0);
     const hasPendingChallans = pendingChallansCount > 0;
@@ -427,7 +507,228 @@ export class SurepassKycProvider extends KycProviderInterface {
         totalPendingAmount,
         hasPendingChallans,
         checkedPortals: portals,
+        failedBackends,
+        successfulBackends,
+        homeState,
         challans,
+      },
+      raw: result.raw,
+    };
+  }
+
+  /**
+   * Helper to normalize Base64 strings for Surepass API
+   * Mobile cameras and file pickers often format captured images as Data URIs:
+   * e.g. data:image/jpeg;base64,/9j/4AAQSkZJRg... or data:application/pdf;base64,...
+   * Surepass expects the raw base64 string, so this strips out everything before the comma.
+   */
+  _cleanBase64(fileBase64) {
+    if (!fileBase64 || typeof fileBase64 !== 'string') return '';
+    const commaIdx = fileBase64.indexOf(',');
+    if (commaIdx !== -1 && commaIdx < 120 && fileBase64.slice(0, commaIdx).includes('base64')) {
+      return fileBase64.slice(commaIdx + 1).trim();
+    }
+    return fileBase64.trim();
+  }
+
+  /**
+   * Extract data from Vehicle RC document using AI OCR
+   * Endpoint: POST https://sandbox.surepass.app/api/v1/ocr/vehicle-rc
+   */
+  async ocrVehicleRc({ fileBase64, mimeType, fileUrl }) {
+    // 1. Document Pre-Validation Guard (₹0 cost):
+    // Validates whether uploaded image is an actual Vehicle RC before invoking Surepass API.
+    // If the image is a wall, selfie, or non-document, rejects early to prevent wasting Surepass credits.
+    if (fileBase64) {
+      try {
+        const cleanFront = this._cleanBase64(fileBase64);
+        if (cleanFront) {
+          const frontBuf = Buffer.from(cleanFront, 'base64');
+          const validation = await validateRcDocumentImage(frontBuf);
+          if (validation && validation.isDocument === false) {
+            this.logger?.warn({ reason: validation.message }, '[SurepassKycProvider] Non-document image rejected by pre-validation guard');
+            return {
+              success: false,
+              provider: this.providerName,
+              data: {
+                status: 'INVALID_DOCUMENT',
+                message: validation.message || 'Invalid Document Image: The uploaded photo does not appear to be a valid physical Vehicle Registration Certificate (RC). Please upload a clear photo of your RC card.',
+              },
+              raw: { status_code: 422, error: 'INVALID_DOCUMENT', message: validation.message },
+            };
+          }
+        }
+      } catch (valErr) {
+        this.logger?.warn({ err: valErr.message }, '[SurepassKycProvider] Pre-validation check encountered error, passing to Surepass');
+      }
+    }
+
+    const payload = {};
+    if (fileUrl) {
+      payload.link = fileUrl;
+    } else {
+      payload.base64 = this._cleanBase64(fileBase64);
+    }
+
+    // Surepass OCR takes 5-15 seconds for image analysis
+    const result = await this._request('/ocr/vehicle-rc', payload, 'POST', 25000);
+
+    if (!result.success) {
+      this.logger?.warn({ endpoint: '/ocr/vehicle-rc', status: result.statusCode, message: result.message }, '[SurepassKycProvider] Live RC OCR returned error');
+      return {
+        success: false,
+        provider: this.providerName,
+        data: {
+          status: 'INVALID_DOCUMENT',
+          message: result.message || 'Invalid Document Image: The uploaded photo does not appear to be a valid physical Vehicle Registration Certificate (RC). Please upload a clear, legible photo of your physical card.',
+        },
+        raw: result.raw,
+      };
+    }
+
+    const d = result.raw.data || {};
+    // Extract and normalize registration number
+    const rawRc = d.rc_number || d.registration_number || d.reg_no || '';
+    const cleanVehicleNumber = rawRc.replaceAll(/[\s-]/g, '').toUpperCase();
+    const cleanEngineNumber = (d.engine_number || d.vehicle_engine_number || '').replaceAll(/[\s-]/g, '').toUpperCase();
+    const cleanChassisNumber = (d.chassis_number || d.vehicle_chasi_number || '').replaceAll(/[\s-]/g, '').toUpperCase();
+
+    return {
+      success: true,
+      provider: this.providerName,
+      data: {
+        vehicleNumber: cleanVehicleNumber || null,
+        engineNumber: cleanEngineNumber || null,
+        chassisNumber: cleanChassisNumber || null,
+        ownerName: d.owner_name || d.name || null,
+        makerModel: d.maker_model || d.model || null,
+        registrationDate: d.registration_date || null,
+        ocrConfidence: d.confidence || d.score || 0.95,
+      },
+      raw: result.raw,
+    };
+  }
+
+  /**
+   * Extract data from Driving License document using AI OCR
+   * Endpoint: POST https://sandbox.surepass.app/api/v1/ocr/license (Accepts multipart/form-data with 'front' and optional 'back')
+   */
+  async ocrDrivingLicense({ fileBase64, mimeType, fileUrl, backFileBase64 }) {
+    // 1. Document Pre-Validation Guard (₹0 cost):
+    // Validates whether uploaded image is an actual Driving License before invoking Surepass API.
+    // If the image is a wall, selfie, or non-document, rejects early to prevent wasting Surepass credits.
+    if (fileBase64) {
+      try {
+        const cleanFront = this._cleanBase64(fileBase64);
+        if (cleanFront) {
+          const frontBuf = Buffer.from(cleanFront, 'base64');
+          const validation = await validateDlDocumentImage(frontBuf);
+          if (validation && validation.isDocument === false) {
+            this.logger?.warn({ reason: validation.message }, '[SurepassKycProvider] Non-document image rejected by pre-validation guard');
+            return {
+              success: false,
+              provider: this.providerName,
+              data: {
+                status: 'INVALID_DOCUMENT',
+                message: validation.message || 'Invalid Document Image: The uploaded photo does not appear to be a valid physical Driving License. Please upload a clear photo of your Driving License.',
+              },
+              raw: { status_code: 422, error: 'INVALID_DOCUMENT', message: validation.message },
+            };
+          }
+        }
+      } catch (valErr) {
+        this.logger?.warn({ err: valErr.message }, '[SurepassKycProvider] Pre-validation check encountered error, passing to Surepass');
+      }
+    }
+
+    let body;
+    if (fileUrl) {
+      body = { link: fileUrl };
+    } else {
+      const cleanFront = this._cleanBase64(fileBase64);
+      if (!cleanFront) {
+        return {
+          success: false,
+          provider: this.providerName,
+          data: {
+            status: 'FAILED',
+            message: 'No front image provided for Driving License OCR.',
+          },
+        };
+      }
+
+      const fd = new FormData();
+      const frontBuf = Buffer.from(cleanFront, 'base64');
+      const frontBlob = new Blob([frontBuf], { type: mimeType || 'image/jpeg' });
+      fd.append('front', frontBlob, 'dl_front.jpg');
+
+      if (backFileBase64) {
+        const cleanBack = this._cleanBase64(backFileBase64);
+        if (cleanBack) {
+          const backBuf = Buffer.from(cleanBack, 'base64');
+          const backBlob = new Blob([backBuf], { type: mimeType || 'image/jpeg' });
+          fd.append('back', backBlob, 'dl_back.jpg');
+        }
+      }
+      body = fd;
+    }
+
+    const result = await this._request('/ocr/license', body, 'POST', 30000);
+
+    if (!result.success) {
+      this.logger?.warn({ endpoint: '/ocr/license', status: result.statusCode, message: result.message }, '[SurepassKycProvider] Live DL OCR returned error');
+      return {
+        success: false,
+        provider: this.providerName,
+        data: {
+          status: 'INVALID_DOCUMENT',
+          message: result.message || 'Invalid Document Image: The uploaded photo does not appear to be a valid physical Driving License. Please ensure your physical card is clearly visible, well-lit, and not a random photo.',
+        },
+        raw: result.raw,
+      };
+    }
+
+    const d = result.raw?.data || {};
+
+    const extractVal = (field) => {
+      if (!field) return null;
+      if (typeof field === 'string') return field.trim();
+      if (typeof field === 'object' && field.value) return String(field.value).trim();
+      return null;
+    };
+
+    const rawDl = extractVal(d.license_number) || extractVal(d.dl_number) || extractVal(d.id_number) || '';
+    const cleanDlNumber = rawDl.replaceAll(/[\s-]/g, '').toUpperCase();
+
+    // Standardize DOB format to YYYY-MM-DD
+    let cleanDob = extractVal(d.dob) || extractVal(d.date_of_birth) || null;
+    if (cleanDob && typeof cleanDob === 'string') {
+      const parts = cleanDob.split(/[-/]/);
+      if (parts.length === 3) {
+        if (parts[2].length === 4) {
+          cleanDob = `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
+        } else if (parts[0].length === 4) {
+          cleanDob = `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
+        }
+      }
+    }
+
+    const name = extractVal(d.name) || extractVal(d.full_name) || null;
+    const fatherName = extractVal(d.father_or_husband_name) || extractVal(d.father_name) || null;
+    const address = extractVal(d.address) || null;
+
+    const hasAnyField = Boolean(cleanDlNumber || cleanDob || name);
+
+    return {
+      success: hasAnyField,
+      provider: this.providerName,
+      data: {
+        dlNumber: cleanDlNumber || null,
+        dob: cleanDob || null,
+        name,
+        fatherOrHusbandName: fatherName,
+        address,
+        ocrConfidence: d.license_number?.confidence || d.confidence || 0.95,
       },
       raw: result.raw,
     };

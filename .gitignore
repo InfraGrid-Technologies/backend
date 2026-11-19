@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+api/node_modules/
+mobile/node_modules/
+
+# Environment and sensitive data
+.env
+api/.env
+*.local
+
+# Expo & Mobile
+.expo/
+mobile/.expo/
+dist/
+web-build/
+
+# Local cache & logs
+scripts/.kyc-local-store.json
+api/scripts/.kyc-local-store.json
+api/postman/local.postman_environment.json
+*.log
+*.traineddata
+.DS_Store
+test-results/
+coverage/
+

@@ -1,0 +1,13 @@
+{
+  "name": "equiprent-platform",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "kyc": "npm --prefix api run start:kyc",
+    "start:kyc": "npm --prefix api run start:kyc",
+    "api": "npm --prefix api run start:kyc",
+    "mobile": "npm --prefix mobile start",
+    "test:kyc": "npm --prefix api run test:consent"
+  }
+}
+

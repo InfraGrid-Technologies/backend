@@ -14,7 +14,7 @@ import {registerModules} from './modules/register.js';
 import kycModule from './modules/kyc/index.js';
 
 export async function buildApp(config,{logger=true}={}) {
-  const app=Fastify({bodyLimit:1024*1024,genReqId:()=>randomUUID(),requestIdHeader:false,
+  const app=Fastify({bodyLimit:15*1024*1024,genReqId:()=>randomUUID(),requestIdHeader:false,
     logger:logger?{level:config.logLevel,redact:['req.headers.authorization'],serializers:{req:r=>({method:r.method,url:r.url?.split('?')[0],remoteAddress:r.ip})}}:false,
     ajv:{customOptions:{removeAdditional:false,coerceTypes:false,useDefaults:false,allErrors:true}}});
   const db=createDatabase(config);
