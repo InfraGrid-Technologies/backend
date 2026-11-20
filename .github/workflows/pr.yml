@@ -1,0 +1,80 @@
+name: pr
+
+on:
+  pull_request:
+    branches: [dev, sit, main]
+
+permissions:
+  contents: read
+
+
+jobs:
+  shared:
+    uses: InfraGrid-Technologies/platform/.github/workflows/pr-checks.yml@dd0d536a754fb1ede55fba021961605a020e244e # v1.0.0
+    with:
+      working-directory: api
+      node-version: '24'
+      lint: false        # no ESLint yet: developer task
+      typecheck: false   # plain JavaScript, nothing for tsc to check
+      unit-tests: false  # no test:unit script yet: developer task
+
+  api-and-db:
+    name: api-and-db
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: api
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: equiprent_model
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-postgres-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d equiprent_model"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+          
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGDATABASE: equiprent_model
+      POSTGRES_DB: equiprent_model
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ci-postgres-password
+      API_DB_PASSWORD: ci-api-db-password-not-a-secret-0001
+      PGUSER: equiprent_api
+      PGPASSWORD: ci-api-db-password-not-a-secret-0001
+      API_ADMIN_KEY: ci-admin-key-not-a-secret-000000000001
+      API_READ_KEY: ci-read-key-not-a-secret-0000000000001
+      KYC_PROVIDER: mock
+
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: api/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Apply migrations to an empty database
+        run: npm run migrate
+      - name: Run all tests
+        run: npm test
+
+
+  docker-build:
+    name: docker-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build the API image (not pushed)
+        run: docker build --tag equiprent-api:ci ./api
